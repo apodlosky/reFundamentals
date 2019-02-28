@@ -1,0 +1,5 @@
+LIBRARY greeting
+EXPORTS
+    SayHello         @10
+    SayHelloMultiple @11
+    SayHelloEx       @12
