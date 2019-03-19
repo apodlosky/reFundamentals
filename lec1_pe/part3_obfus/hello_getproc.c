@@ -17,38 +17,15 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "hello.h"
 
-//
-// Type definitions for Windows API function pointers. It is absolutely
-// critical that these definitions replicate the original function signature
-// (return type, calling conventions, number of parameters and their types)
-// in order for the compiler to generate proper code for calling them.
-//
-// Note: WinAPI functions use __stdcall calling conventions on X86 (32bit),
-// which the WINAPI macro will appropriately expand to.
-// https://docs.microsoft.com/en-us/cpp/cpp/stdcall?view=vs-2017
-//
-
-typedef HANDLE (WINAPI *PFN_GETSTDHANDLE)(
-    DWORD nStdHandle);
-
-typedef BOOL (WINAPI *PFN_WRITEFILE)(
-    HANDLE hFile,
-    LPCVOID lpBuffer,
-    DWORD nNumberOfBytesToWrite,
-    LPDWORD lpNumberOfBytesWritten,
-    LPOVERLAPPED lpOverlapped);
-
-typedef VOID (WINAPI *PFN_EXITPROCESS)(
-    UINT uExitCode);
+// Buffer to display to the console
+static const char m_output[] = "hello, world\n";
 
 // Pointers to our resolved kernel32.dll functions
 static PFN_GETSTDHANDLE  p_GetStdHandle;
 static PFN_WRITEFILE     p_WriteFile;
 static PFN_EXITPROCESS   p_ExitProcess;
-
-// Buffer to display to the console
-static const char m_output[] = "hello, world\n";
 
 //
 // Dynamically resolves functions from the kernel32.dll library on runtime
@@ -70,11 +47,9 @@ static BOOL resolveFuncs(VOID)
         }
     }
 
-    //
     // Locates the given function names in the library's export directory
     // and returns a pointer to the address of the function. GetProcAddress
     // returns NULL on failure (i.e. could not locate the given function name).
-    //
 
     p_GetStdHandle = (PFN_GETSTDHANDLE)GetProcAddress(module, "GetStdHandle");
     if (p_GetStdHandle == NULL) {
@@ -91,12 +66,10 @@ static BOOL resolveFuncs(VOID)
         return FALSE;
     }
 
-    //
     // Normally, FreeLibrary() should be called when finished with a given
     // library because libraries are reference counted by the Loader. However,
     // we will require access to these functions for the entirety of this
     // application's execution.
-    //
 
     return TRUE;
 }
@@ -113,10 +86,7 @@ void __stdcall EntryPoint(void)
         return;
     }
 
-    //
     // Call the 'p_' pointers to our dynamically resolved WinAPI functions
-    //
-
     stdOutput = p_GetStdHandle(STD_OUTPUT_HANDLE);
     if (stdOutput == INVALID_HANDLE_VALUE) {
         result = 1;

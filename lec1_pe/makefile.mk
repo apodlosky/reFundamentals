@@ -16,6 +16,7 @@
 P1_DIR      = ./part1_intro
 P2_DIR      = ./part2_dll
 P3_DIR      = ./part3_obfus
+P4_DIR      = ./part4_infect
 OUT_DIR     = ./build
 
 # Build tools
@@ -83,7 +84,7 @@ OUT_DIR     = $(OUT_DIR)-dyn
 
 default: all
 
-all: part1 part2 part3
+all: part1 part2 part3 part4
 
 setup:
     @IF NOT EXIST "$(OUT_DIR)" MKDIR "$(OUT_DIR)"
@@ -106,6 +107,10 @@ part3: setup \
         "$(OUT_DIR)/hello_modenum.exe" \
         "$(OUT_DIR)/hello_stealth.exe"
     @ECHO [-] Finished building part 3
+
+part4: setup \
+        "$(OUT_DIR)/infector.exe"
+    @ECHO [-] Finished building part 4
 
 distclean:
     @ECHO [-] Deleting intermediate files
@@ -196,5 +201,14 @@ clean: distclean
     @$(CC) $(CFLAGS_NOCRT) /Fo$@ $**
 
 "$(OUT_DIR)/hello_stealth.exe": "$(OUT_DIR)/hello_stealth.obj"
-    @$(LD) $(LFLAGS_NOCRT) /SUBSYSTEM:console /EMITPOGOPHASEINFO /OUT:$@ $**
+    @$(LD) $(LFLAGS_NOCRT) /SUBSYSTEM:console /FIXED /EMITPOGOPHASEINFO /OUT:$@ $**
 
+#
+# Part 4 build rules
+#
+
+"$(OUT_DIR)/infector.obj": "$(P4_DIR)/infector.c"
+    @$(CC) $(CFLAGS) /Fo$@ $**
+
+"$(OUT_DIR)/infector.exe": "$(OUT_DIR)/infector.obj"
+    @$(LD) $(LFLAGS) /OUT:$@ $**

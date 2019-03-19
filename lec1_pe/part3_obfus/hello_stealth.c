@@ -7,8 +7,9 @@
 // Can we hide all of our imports? So far we have either had LoadLibrary and
 // GetProcAddress or the EnumProcessModules functions in our import table.
 //
-// If Ntdll.dll and Kernel32.dll are automatically loaded into every process
-// by the loader, Windows stores a list of these modules.
+// If Ntdll.dll and Kernel32.dll are automatically mapped into every process
+// by the loader, Windows stores a list of these modules. Access the list to
+// locate the base of the kernel32.dll.
 //
 // TEB and PEB structures (very limited information):
 // https://docs.microsoft.com/en-us/windows/desktop/api/winternl/ns-winternl-teb
@@ -23,32 +24,8 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "hello.h"
 #include "nt_internal.h"
-
-//
-// Type definitions for Windows API functions
-//
-
-typedef HANDLE (WINAPI *PFN_GETSTDHANDLE)(
-    DWORD nStdHandle);
-
-typedef BOOL (WINAPI *PFN_WRITEFILE)(
-    HANDLE hFile,
-    LPCVOID lpBuffer,
-    DWORD nNumberOfBytesToWrite,
-    LPDWORD lpNumberOfBytesWritten,
-    LPOVERLAPPED lpOverlapped);
-
-typedef VOID (WINAPI *PFN_EXITPROCESS)(
-    UINT uExitCode);
-
-//
-// Pointers to dynamically resolved kernel32.dll functions
-//
-
-static PFN_EXITPROCESS    p_ExitProcess;
-static PFN_GETSTDHANDLE   p_GetStdHandle;
-static PFN_WRITEFILE      p_WriteFile;
 
 //
 // Buffer to output (obfuscated).
@@ -56,24 +33,73 @@ static PFN_WRITEFILE      p_WriteFile;
 // for i = 0..OUTPUT_SIZE
 //   xorOutput[i] = output[i] ^ OUTPUT_XOR
 //
-#define OUTPUT_SIZE     13
-#define OUTPUT_XOR      0x64
+#define OUTPUT_SIZE         13
+#define OUTPUT_XOR          0x64
 
 //static const char m_output[] = "hello, world\n";
-
 static const BYTE m_xorOutput[OUTPUT_SIZE] = {
     0x0c, 0x01, 0x08, 0x08, 0x0b, 0x48, 0x44,
     0x13, 0x0b, 0x16, 0x08, 0x00, 0x6e
 };
 
 //
+// Pointers to dynamically resolved kernel32.dll functions
+//
+
+static PFN_EXITPROCESS      p_ExitProcess;
+static PFN_GETSTDHANDLE     p_GetStdHandle;
+static PFN_WRITEFILE        p_WriteFile;
+
+//
 // CRC32 values of strings (NOT including the terminating null character).
 //
 
-#define CRC_KERNEL32DLL  0x6AE69F02 // "kernel32.dll"
-#define CRC_EXITPROCESS  0x251097CC // "ExitProcess"
-#define CRC_GETSTDHANDLE 0xDADD89EB // "GetStdHandle"
-#define CRC_WRITEFILE    0xCCE95612 // "WriteFile"
+#define CRC_KERNEL32DLL     0x6AE69F02 // "kernel32.dll"
+#define CRC_EXITPROCESS     0x251097CC // "ExitProcess"
+#define CRC_GETSTDHANDLE    0xDADD89EB // "GetStdHandle"
+#define CRC_WRITEFILE       0xCCE95612 // "WriteFile"
+
+//
+// Determines the length of a null-terminated string.
+//
+static SIZE_T stringLengthA(const CHAR *str)
+{
+    const CHAR *end;
+
+    for (end = str; *end != '\0'; end++);
+
+    return end - str;
+}
+
+//
+// Converts a wide-character string to a lower-case ANSI string. Note, this
+// function ignores ALL Unicode correctness and really should not be used
+// outside of this limited application.
+//
+static VOID stringWToLowerA(const WCHAR *in, SIZE_T inLen, CHAR *out, SIZE_T *outLenPtr)
+{
+    SIZE_T i;
+
+    for (i = 0; i < inLen && i < *outLenPtr; i++) {
+        if (in[i] == '\0') {
+            break;
+        }
+
+        // WCHAR-to-CHAR kludge
+        out[i] = (CHAR)(in[i] & 0x00FF);
+
+        if (out[i] >= 'A' && out[i] <= 'Z') {
+            out[i] -= ('A' - 'a');
+        }
+    }
+
+    // Truncate if needed
+    if (i >= *outLenPtr) {
+        i--;
+    }
+    out[i] = '\0';
+    *outLenPtr = i;
+}
 
 //
 // Calcuates the CRC32 checksum of a given buffer.
@@ -101,54 +127,11 @@ static UINT32 crc32(const VOID *buffer, SIZE_T length)
 }
 
 //
-// Determines the length of a null-terminated string.
-//
-static SIZE_T stringLengthA(const CHAR *str)
-{
-    const CHAR *end;
-
-    for (end = str; *end != '\0'; end++);
-
-    return end - str;
-}
-
-//
 // Calcuates the CRC-32 checksum of a null-terminated string.
 //
-static UINT32 stringCrc32A(const CHAR *str)
+static UINT32 crc32StringA(const CHAR *str)
 {
     return crc32(str, stringLengthA(str));
-}
-
-//
-// Converts a wide-character string to a lower-case ANSI string. Note, this
-// function ignores ALL Unicode correctness and really should not be used
-// outside of this limited application.
-//
-static VOID stringWToLowerA(const WCHAR *in, SIZE_T inLen, CHAR *out, SIZE_T *outLenPtr)
-{
-    SIZE_T i;
-
-    for (i = 0; i < inLen && i < *outLenPtr; i++) {
-        if (in[i] == '\0') {
-            break;
-        }
-
-        // WCHAR-to-CHAR kludge
-        out[i] = (CHAR)(in[i] & 0x00FF);
-
-        // Convert to lower case
-        if (out[i] >= 'A' && out[i] <= 'Z') {
-            out[i] -= ('A' - 'a');
-        }
-    }
-
-    // Truncate if needed, add terminating null
-    if (i >= *outLenPtr) {
-        i--;
-    }
-    out[i] = '\0';
-    *outLenPtr = i;
 }
 
 //
@@ -166,41 +149,30 @@ static HMODULE locateKernel32Module(VOID)
     CHAR                 baseName[128];
     SIZE_T               baseNameLen;
 
-    //
     // Retrieve the PEB and locate the loader data, which contains several
     // lists of modules modules currently loaded in this process.
-    //
     peb = GetPEB();
-    ldrData = peb->Ldr;
 
-    // The address of the first LIST_ENTRY structure will mark our end
+    // Use the first LIST_ENTRY structure as the end (circular list)
+    ldrData = peb->Ldr;
     start = &(ldrData->InMemoryOrderModuleList);
 
-    // Iterate through the linked list of LIST_ENTRY structures
     for (entry = start->Flink; entry != start && entry != NULL; entry = entry->Flink) {
+        ldrEntry = CONTAINING_RECORD(entry,
+            LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
 
-        // Locate the base of the LDR_DATA_TABLE_ENTRY structure
-        ldrEntry = CONTAINING_RECORD(entry, LDR_DATA_TABLE_ENTRY,
-            InMemoryOrderLinks);
-
-        // Convert the wide-character name to a lower-case ANSI string
+        // Convert UNICODE_STRING to lower-case C-style string
         baseNameLen = sizeof(baseName);
         stringWToLowerA(ldrEntry->BaseDllName.Buffer,
             ldrEntry->BaseDllName.Length, baseName, &baseNameLen);
 
         if (crc32(baseName, baseNameLen) == CRC_KERNEL32DLL) {
-            // Found kernel32, return the base address
             return (HMODULE)ldrEntry->DllBase;
         }
     }
 
     return NULL;
 }
-
-//
-// Returns the base pointer adjusted to the specified offset.
-//
-#define RVA_TO_PTR(base, offset) ((VOID *)(((BYTE *)base) + offset))
 
 //
 // Simple implementation of GetProcAddress for resolving the addresses of
@@ -236,15 +208,14 @@ static VOID *getProcByCrc32(HMODULE base, UINT32 crcProcName)
     // header size, and the optional-header's magic value
     if (ntHdr->Signature != IMAGE_NT_SIGNATURE ||
         ntHdr->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER) ||
-        ntHdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC) {
+        ntHdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC ||
+        ntHdr->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
         return NULL;
     }
 
-    //
     // NOTE: There is NO bounds checking done to ensure the RVAs have not
     // exceeded the image size. Do NOT use this code with potentially hostile
     // DLL files.
-    //
 
     // Use the NT header to locate the export directory (RVA from image base)
     expDir = RVA_TO_PTR(base, ntHdr->OptionalHeader.DataDirectory
@@ -256,10 +227,10 @@ static VOID *getProcByCrc32(HMODULE base, UINT32 crcProcName)
     tblFuncs = RVA_TO_PTR(base, expDir->AddressOfFunctions);
 
     for (i = 0; i < expDir->NumberOfNames; i++) {
-        // The Names table, containing RVAs to C-style strings, is indexed
+        // The Names table, containing RVAs to C-style strings, it is indexed
         // from 0 to NumberOfNames-1.
         name = RVA_TO_PTR(base, tblNames[i]);
-        if (stringCrc32A(name) != crcProcName) {
+        if (crc32StringA(name) != crcProcName) {
             continue;
         }
 
@@ -277,7 +248,6 @@ static VOID *getProcByCrc32(HMODULE base, UINT32 crcProcName)
         //
         ordinal = tblNameOrds[i];
 
-        // Verify function index is not out-of-bounds
         if (ordinal >= expDir->NumberOfFunctions) {
             return NULL;
         }
@@ -296,16 +266,12 @@ static BOOL resolveFuncs(VOID)
 {
     HMODULE module;
 
-    // Locate the kernel32.dll module in this process
     module = locateKernel32Module();
     if (module == NULL) {
         return FALSE;
     }
 
-    //
     // Look-up functions by the CRC32 value of their names
-    //
-
     p_ExitProcess = (PFN_EXITPROCESS)getProcByCrc32(module, CRC_EXITPROCESS);
     if (p_ExitProcess == NULL) {
         return FALSE;
@@ -359,10 +325,7 @@ void __stdcall TlsCallback(HMODULE instance, DWORD reason, void *reserved)
         return;
     }
 
-    //
-    // Decode string from a simple XOR obfuscation:
-    //  str[i] = xor[i] ^ 0x64
-    //
+    // Decode output string
     for (i = 0; i < OUTPUT_SIZE; i++) {
         output[i] = m_xorOutput[i] ^ OUTPUT_XOR;
     }
@@ -374,7 +337,7 @@ void __stdcall TlsCallback(HMODULE instance, DWORD reason, void *reserved)
         result = 2;
     } else {
         // Success
-        result = reason;
+        result = 0;
     }
 
     p_ExitProcess(result);
@@ -384,13 +347,13 @@ void __stdcall TlsCallback(HMODULE instance, DWORD reason, void *reserved)
 }
 
 //
-// Setup .tls PE section
+// Setup PE sections for thread local storage (TLS) callbacks
 //
 
-#pragma section(".CRT$XLA", long, read)
-#pragma section(".CRT$XLB", long, read)
-#pragma section(".CRT$XLZ", long, read)
-#pragma section(".rdata$T", long, read)
+#pragma section(".tlsc$a", long, read)
+#pragma section(".tlsc$b", long, read)
+#pragma section(".tlsc$c", long, read)
+#pragma section(".rdata$t", long, read)
 
 ULONG _tls_index = 0;
 
@@ -414,16 +377,16 @@ char _tls_end = 0;
 // TLS callback array
 //
 
-__declspec(allocate(".CRT$XLA")) PIMAGE_TLS_CALLBACK __xl_a = 0;
-__declspec(allocate(".CRT$XLB")) PIMAGE_TLS_CALLBACK __xl_b = TlsCallback;
-__declspec(allocate(".CRT$XLZ")) PIMAGE_TLS_CALLBACK __xl_z = 0;
+__declspec(allocate(".tlsc$a")) PIMAGE_TLS_CALLBACK __xl_a = 0;
+__declspec(allocate(".tlsc$b")) PIMAGE_TLS_CALLBACK __xl_b = TlsCallback;
+__declspec(allocate(".tlsc$c")) PIMAGE_TLS_CALLBACK __xl_c = 0;
 
 //
 // TLS directory
 //
 
 #ifdef _WIN64
-__declspec(allocate(".rdata$T"))
+__declspec(allocate(".rdata$t"))
 extern const IMAGE_TLS_DIRECTORY64 _tls_used = {
     (ULONGLONG)&_tls_start,
     (ULONGLONG)&_tls_end,
@@ -432,8 +395,8 @@ extern const IMAGE_TLS_DIRECTORY64 _tls_used = {
     0,
     0
 };
-#else /* _WIN64 */
-__declspec(allocate(".rdata$T"))
+#else
+__declspec(allocate(".rdata$t"))
 extern const IMAGE_TLS_DIRECTORY _tls_used = {
     (ULONG)&_tls_start,
     (ULONG)&_tls_end,
@@ -442,4 +405,4 @@ extern const IMAGE_TLS_DIRECTORY _tls_used = {
     0,
     0
 };
-#endif /* _WIN64 */
+#endif

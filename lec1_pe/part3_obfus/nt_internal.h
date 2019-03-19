@@ -383,7 +383,7 @@ __forceinline PEB *GetPEB(VOID)
 }
 
 //
-// Offset verifcations
+// Offset verifications
 //
 
 #ifdef _WIN64

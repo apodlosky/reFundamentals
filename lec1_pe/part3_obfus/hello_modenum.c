@@ -20,27 +20,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
+#include "hello.h"
 
-//
-// Type definitions for Windows API functions
-//
-
-typedef FARPROC (WINAPI *PFN_GETPROCADDRESS)(
-    HMODULE hModule,
-    LPCSTR lpProcName);
-
-typedef HANDLE (WINAPI *PFN_GETSTDHANDLE)(
-    DWORD nStdHandle);
-
-typedef BOOL (WINAPI *PFN_WRITEFILE)(
-    HANDLE hFile,
-    LPCVOID lpBuffer,
-    DWORD nNumberOfBytesToWrite,
-    LPDWORD lpNumberOfBytesWritten,
-    LPOVERLAPPED lpOverlapped);
-
-typedef VOID (WINAPI *PFN_EXITPROCESS)(
-    UINT uExitCode);
+// Buffer to display to the console
+static const char m_output[] = "hello, world\n";
 
 //
 // Pointers to dynamically resolved kernel32.dll functions
@@ -50,9 +33,6 @@ static PFN_GETPROCADDRESS p_GetProcAddress;
 static PFN_GETSTDHANDLE   p_GetStdHandle;
 static PFN_WRITEFILE      p_WriteFile;
 static PFN_EXITPROCESS    p_ExitProcess;
-
-// Buffer to display to the console
-static const char m_output[] = "hello, world\n";
 
 //
 // Compares two strings for equality, case-sensitive.
@@ -108,35 +88,23 @@ static HMODULE locateKernel32Module(VOID)
 
     currProcess = GetCurrentProcess();
     countBytes = 0;
-
-    //
-    // Enumerate module list
-    //
-
     if (!EnumProcessModules(currProcess, modules, sizeof(modules), &countBytes)) {
         return NULL;
     }
 
     for (i = 0; i < (countBytes / sizeof(HMODULE)); i++) {
-
         // Retrieve file name of module (e.g. foo.dll)
         if (!GetModuleBaseNameA(currProcess, modules[i], name, sizeof(name))) {
             continue;
         }
 
         if (stringEqualNoCaseA(name, "kernel32.dll")) {
-            // Found kernel32! We're done...
             return modules[i];
         }
     }
 
     return NULL;
 }
-
-//
-// Returns the base pointer adjusted to the specified offset.
-//
-#define RVA_TO_PTR(base, offset) ((VOID *)(((BYTE *)base) + offset))
 
 //
 // Simple implementation of GetProcAddress for resolving the addresses of
@@ -172,15 +140,14 @@ static VOID *getProcByName(HMODULE base, const char *procName)
     // header size, and the optional-header's magic value
     if (ntHdr->Signature != IMAGE_NT_SIGNATURE ||
         ntHdr->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER) ||
-        ntHdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC) {
+        ntHdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR_MAGIC ||
+        ntHdr->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_EXPORT) {
         return NULL;
     }
 
-    //
     // NOTE: There is NO bounds checking done to ensure the RVAs have not
     // exceeded the image size. Do NOT use this code with potentially hostile
     // DLL files.
-    //
 
     // Use the NT header to locate the export directory (RVA from image base)
     expDir = RVA_TO_PTR(base, ntHdr->OptionalHeader.DataDirectory
@@ -199,7 +166,6 @@ static VOID *getProcByName(HMODULE base, const char *procName)
             continue;
         }
 
-        //
         // To calculate the ordinal value of an exported function, the value
         // obtained from the ordinals table must be added with the Base.
         //   RelativeOrdinal = NameOrdinals[IndexOfName]
@@ -210,7 +176,6 @@ static VOID *getProcByName(HMODULE base, const char *procName)
         //   FuncAddr = Funcs[ActualOrdinal - OrdinalBase]
         // or simply:
         //   FuncAddr = Funcs[RelativeOrdinal]
-        //
         ordinal = tblNameOrds[i];
 
         // Verify function index is not out-of-bounds
@@ -233,7 +198,6 @@ static BOOL resolveFuncs(VOID)
 {
     HMODULE module;
 
-    // Locate the kernel32.dll module in this process
     module = locateKernel32Module();
     if (module == NULL) {
         return FALSE;
@@ -245,12 +209,6 @@ static BOOL resolveFuncs(VOID)
         return FALSE;
     }
 
-    //
-    // We could just use getProcByName()...but it may be useful to set a
-    // breakpoint on GetProcAddress during the demo.
-    //
-
-    // Now use GetProcAddress to look-up the remaining WinAPI functions
     p_GetStdHandle = (PFN_GETSTDHANDLE)p_GetProcAddress(module, "GetStdHandle");
     if (p_GetStdHandle == NULL) {
         return FALSE;
